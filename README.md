@@ -155,6 +155,16 @@ Both URLs reach the same gateway and the same 1576+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
+## No MCP client? Call it over HTTP
+
+```bash
+curl -X POST https://gateway.pipeworx.io/v1/tools/reconcile_wikidata_osm \
+  -H 'Content-Type: application/json' \
+  -d '{"qids":["Q162887","Q3650523","Q4501177"],"osm_filter":"power=plant","languages":"ka,ru,en","radius_m":2000}'
+```
+
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/reconcile_wikidata_osm`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+
 ## Standalone (no gateway account)
 
 This package also runs as a local stdio MCP server — no Pipeworx account, no
