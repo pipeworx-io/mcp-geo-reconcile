@@ -670,12 +670,138 @@ function pickMessage(node: unknown, depth: number): string | null {
 function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
+
+
+/**
+ * Overpass host failover, shared by every pack that queries OpenStreetMap
+ * Overpass (`overpass`, `geo-reconcile`). Fleet #2451.
+ *
+ * Public Overpass is a handful of volunteer instances, and from our egress
+ * (Cloudflare Worker IPs, and the Supabase egress relay) at most one or two of
+ * them answer at any time. Measured 2026-09-26, one POST per host, same
+ * `amenity=cafe` query:
+ *
+ *   overpass.kumi.systems  CNAME of overpass.private.coffee. /api/interpreter
+ *                          hangs past 30s (the site root answers 404 in 0.5s,
+ *                          so the host is up and the Overpass backend is not).
+ *                          It had been the only host answering our relay
+ *                          (#2036); it went dark ~09-19 and took both packs
+ *                          with it, because the only fallback was the next one.
+ *   overpass-api.de        200 from a residential address, but a 371-byte
+ *                          Apache 406 to the relay's IPs under every request
+ *                          shape (an IP block, #2036) and 429/521 to CF egress.
+ *   maps.mail.ru           200 with current data (timestamp_osm_base within a
+ *                          minute of now) for Paris AND New York — a full
+ *                          planet, not a regional extract — but slow: 13-17s,
+ *                          and /api/status alone takes ~17s, so the latency is
+ *                          the front end, not the query.
+ *
+ * Ruled out, so nobody re-probes them: overpass.osm.ch (Switzerland-only
+ * extract: 200 with ZERO elements elsewhere — a silent-zero trap),
+ * overpass.monicz.dev and overpass.openstreetmap.ru (timeout), overpass.osm.jp
+ * (TLS failure), lz4.overpass-api.de (504), overpass.openstreetmap.fr (403
+ * whitelist-only).
+ *
+ * So the order is: the host that USED to serve us fast, then the slow host that
+ * serves us now, then the canonical instance in case our egress ever changes.
+ * A host that hangs or refuses is benched for a few minutes per isolate, so the
+ * dead one costs its timeout once, not on every call — without that, a dead
+ * kumi would put 12s in front of every answer.
+ */
+
+interface OverpassHost {
+  /** Short name for errors and `served_by`. */
+  name: string;
+  url: string;
+  /** Per-attempt bound. A hang and a refusal both mean "ask the next host". */
+  timeoutMs: number;
+}
+
+const OVERPASS_HOSTS: readonly OverpassHost[] = [
+  { name: 'overpass.kumi.systems', url: 'https://overpass.kumi.systems/api/interpreter', timeoutMs: 12_000 },
+  { name: 'maps.mail.ru', url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', timeoutMs: 25_000 },
+  { name: 'overpass-api.de', url: 'https://overpass-api.de/api/interpreter', timeoutMs: 5_000 },
+];
+
+/**
+ * Statuses that mean THIS HOST is refusing us rather than that the QUERY is
+ * wrong. Only these move on to the next host: a 400 is malformed QL and a 504 is
+ * a query too big for any server, and re-running either on another volunteer
+ * host doubles the load to get the same answer. 403 also covers the egress
+ * relay's own `host_not_allowed`.
+ */
+const OVERPASS_HOST_REFUSED: ReadonlySet<number> = new Set([403, 406, 429, 502, 503, 521]);
+
+/** How long a host that hung or refused is skipped (per isolate). */
+const OVERPASS_BENCH_MS = 5 * 60_000;
+
+const benchedUntil = new Map<string, number>();
+
+/** Test hook: forget every benched host. */
+function resetOverpassBench(): void {
+  benchedUntil.clear();
+}
+
+interface OverpassAnswer {
+  res: Response;
+  /** Which host produced `res`. */
+  served_by: string;
+}
+
+/**
+ * Send one Overpass request, failing over across OVERPASS_HOSTS.
+ *
+ * `send` performs the actual request (relay or direct — that is the pack's
+ * business) against `url` within `timeoutMs`, and may throw on timeout.
+ *
+ * Returns the first response that is not a host refusal — including a 400 or
+ * 504, which the caller reports as a query problem. When every host refuses or
+ * hangs, throws an Error naming what each host did, so the caller sees "kumi
+ * timed out; mail.ru 406; overpass-api.de 406" rather than one opaque HTML
+ * error page that reads as a malformed query.
+ */
+async function postOverpass(
+  send: (url: string, timeoutMs: number) => Promise<Response>,
+  now: () => number = Date.now,
+): Promise<OverpassAnswer> {
+  const t = now();
+  const live = OVERPASS_HOSTS.filter((h) => (benchedUntil.get(h.name) ?? 0) <= t);
+  // Everything benched means the bench knows nothing current: try them all.
+  const order = live.length > 0 ? live : OVERPASS_HOSTS;
+  const attempts: string[] = [];
+  let rateLimited = false;
+
+  for (const host of order) {
+    let res: Response;
+    try {
+      res = await send(host.url, host.timeoutMs);
+    } catch (e) {
+      benchedUntil.set(host.name, now() + OVERPASS_BENCH_MS);
+      attempts.push(`${host.name}: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    if (OVERPASS_HOST_REFUSED.has(res.status)) {
+      benchedUntil.set(host.name, now() + OVERPASS_BENCH_MS);
+      if (res.status === 429) rateLimited = true;
+      attempts.push(`${host.name}: HTTP ${res.status}`);
+      try { await res.body?.cancel(); } catch { /* already consumed */ }
+      continue;
+    }
+    benchedUntil.delete(host.name);
+    return { res, served_by: host.name };
+  }
+
+  throw new Error(
+    `Overpass: no public Overpass instance answered${rateLimited ? ' (one is rate-limiting — try again shortly)' : ''}. ` +
+      `${attempts.join('; ')}.`,
+  );
+}
 /**
  * Wikidata <-> OpenStreetMap reconciliation.
  *
  * Sourced from the Wikidata Query Service (query.wikidata.org), the Wikidata
  * API (www.wikidata.org/w/api.php) and the OpenStreetMap Overpass API
- * (overpass.kumi.systems, with overpass-api.de as fallback) — all three
+ * (overpass.kumi.systems, then maps.mail.ru, then overpass-api.de) — all three
  * keyless and public.
  *
  * THE JOB: given a set of Wikidata items (explicit Q-ids, or a SPARQL selector
@@ -713,30 +839,19 @@ async function pwFetchWikidata(url: string | URL, init?: RequestInit): Promise<R
   return fetchWithTimeout(url, init ?? {}, 'Wikidata');
 }
 
-async function pwFetchOverpass(url: string | URL, init?: RequestInit): Promise<Response> {
-  return fetchWithTimeout(url, init ?? {}, 'OpenStreetMap Overpass');
+async function pwFetchOverpass(url: string | URL, init?: RequestInit, timeoutMs?: number): Promise<Response> {
+  return timeoutMs === undefined
+    ? fetchWithTimeout(url, init ?? {}, 'OpenStreetMap Overpass')
+    : fetchWithTimeout(url, init ?? {}, 'OpenStreetMap Overpass', timeoutMs);
 }
 
 const WD_API = 'https://www.wikidata.org/w/api.php';
 const WDQS_ENDPOINT = 'https://query.wikidata.org/sparql';
-// kumi.systems leads, and overpass-api.de is the fallback rather than the
-// primary, for the reason measured in fleet #2036 and written up at length in
-// mcps/overpass/src/index.ts: overpass-api.de returns a 371-byte Apache 406 to
-// our relay egress for EVERY request shape tried — both Accept values, no
-// Accept at all, no UA, and a bare GET of /api/status, plus both named
-// backends — while answering 200 from a residential address under all of them.
-// That is an IP block wearing a 406, so no header or hop recovers it. This
-// pack's OSM leg was the second casualty of it (the first being `overpass`),
-// and unlike that pack it had no fallback at all, so its reconciliation was
-// silently running Wikidata-only.
-const OVERPASS_ENDPOINT = 'https://overpass.kumi.systems/api/interpreter';
-const OVERPASS_FALLBACK = 'https://overpass-api.de/api/interpreter';
-
-// Statuses that mean the HOST is refusing us rather than that the QUERY is
-// wrong — the same set `overpass` uses. A 400 is bad QQL and a 504 is a query
-// too big for any server; re-running either against a second volunteer host
-// just buys the same answer twice.
-const OVERPASS_HOST_REFUSED = new Set([403, 406, 429, 502, 503, 521]);
+// Overpass hosts, their order and the failover between them live in
+// shared/src/overpass.ts (postOverpass), shared with the `overpass` pack. This
+// pack used to hard-code kumi.systems -> overpass-api.de; when kumi went dark
+// (~2026-09-19) the fallback 406'd our relay and the OSM leg died with it
+// (fleet #2451).
 const WD_UA = 'pipeworx-mcp-geo-reconcile/1.0 (+https://pipeworx.io; bruce@mojibake.ai)';
 const OVERPASS_UA = 'Pipeworx-GeoReconcile-MCP/0.1 (contact@mojibake.ai)';
 
@@ -770,7 +885,7 @@ let PROXY: { url: string; token: string } | null = null;
 
 async function relay(
   target: string,
-  init: { method?: string; body?: string; contentType?: string },
+  init: { method?: string; body?: string; contentType?: string; timeoutMs?: number },
 ): Promise<Response | null> {
   if (!PROXY) return null;
   return pwFetchOverpass(PROXY.url, {
@@ -783,7 +898,7 @@ async function relay(
       ...(init.contentType ? { contentType: init.contentType } : {}),
       userAgent: OVERPASS_UA,
     }),
-  });
+  }, init.timeoutMs);
 }
 
 // ── Tool definition ──────────────────────────────────────────────────
@@ -1056,34 +1171,18 @@ async function overpassSearch(
 
   const body = `data=${encodeURIComponent(qql)}`;
 
-  const post = async (endpoint: string): Promise<Response> =>
-    (await relay(endpoint, { method: 'POST', body, contentType: 'application/x-www-form-urlencoded' }))
+  const post = async (endpoint: string, timeoutMs: number): Promise<Response> =>
+    (await relay(endpoint, { method: 'POST', body, contentType: 'application/x-www-form-urlencoded', timeoutMs }))
       ?? (await pwFetchOverpass(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'User-Agent': OVERPASS_UA },
         body,
-      }));
+      }, timeoutMs));
 
-  // A refusal and a hang both mean "ask the other host": kumi is a single
-  // volunteer instance and was down for part of 2026-09-15, so treating only
-  // refusals as fallback-worthy would leave this leg dark for the whole of any
-  // such window.
-  let res: Response;
-  try {
-    res = await post(OVERPASS_ENDPOINT);
-    if (OVERPASS_HOST_REFUSED.has(res.status)) {
-      const fallbackRes = await post(OVERPASS_FALLBACK);
-      // When BOTH refuse, report the PRIMARY's status. The fallback refuses us
-      // unconditionally, so its generic 406 would displace the primary's
-      // actionable one (a 429 says "retry shortly") with something that reads
-      // as a bad query. Same reasoning as mcps/overpass.
-      if (!OVERPASS_HOST_REFUSED.has(fallbackRes.status)) res = fallbackRes;
-    }
-  } catch {
-    res = await post(OVERPASS_FALLBACK);
-  }
+  // Refusals and hangs fail over across hosts inside postOverpass; when none
+  // answers it throws naming what each host did.
+  const { res } = await postOverpass(post);
 
-  if (res.status === 429) throw new Error('Overpass: rate-limited (HTTP 429). The OSM search did not run — try again shortly, or narrow the area/tag.');
   if (res.status === 504) throw new Error('Overpass: query timed out (HTTP 504). The OSM search did not complete — raise overpass_timeout_s, or narrow the area/tag.');
   if (!res.ok) {
     const t = await res.text();
@@ -1411,7 +1510,7 @@ async function reconcile(args: Record<string, unknown>): Promise<unknown> {
     osm,
     summary,
     results,
-    source: 'Wikidata Query Service (query.wikidata.org) + Wikidata API (www.wikidata.org) + OpenStreetMap Overpass API (overpass.kumi.systems, falling back to overpass-api.de)',
+    source: 'Wikidata Query Service (query.wikidata.org) + Wikidata API (www.wikidata.org) + OpenStreetMap Overpass API (overpass.kumi.systems, maps.mail.ru or overpass-api.de — whichever answers)',
   };
 }
 

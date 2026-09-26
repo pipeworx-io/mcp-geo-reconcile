@@ -41,12 +41,11 @@ Worker egress while returning 200 to the same request from elsewhere
 Overpass directly and works from any non-Cloudflare-Worker environment
 without relay configuration.
 
-The OSM leg goes to `overpass.kumi.systems` FIRST and falls back to
-`overpass-api.de`, because the latter now refuses the relay's egress as well —
-406 to every request shape tried, including a bare `GET /api/status`, while
-answering 200 to all of them from a residential address (fleet #2036). Until
-2026-09-15 this pack had no fallback, so whenever that refusal was in force
-the reconciliation ran Wikidata-only and reported its OSM leg as `error`.
+The OSM leg fails over across public Overpass instances — `overpass.kumi.systems`,
+then `maps.mail.ru`, then `overpass-api.de` — via the helper shared with the
+`overpass` pack (`shared/src/overpass.ts`). kumi went dark ~2026-09-19 and
+overpass-api.de 406s our egress (fleet #2036), so with only those two the OSM
+leg was dead from then until fleet #2451 added mail.ru.
 
 ## Data sources
 
@@ -55,8 +54,9 @@ the reconciliation ran Wikidata-only and reported its OSM leg as `error`.
 - <https://query.wikidata.org/sparql> — runs a caller-supplied SPARQL SELECT
   to discover the item set when `sparql` is given instead of `qids`.
 - <https://overpass.kumi.systems/api/interpreter> — the OSM feature search
-  within the bounding box covering every resolved item's coordinate, with
-  <https://overpass-api.de/api/interpreter> as fallback.
+  within the bounding box covering every resolved item's coordinate, failing
+  over to <https://maps.mail.ru/osm/tools/overpass/api/interpreter> and
+  <https://overpass-api.de/api/interpreter>.
 
 Notes for the next person:
 
