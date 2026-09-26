@@ -725,12 +725,20 @@ const OVERPASS_HOSTS: readonly OverpassHost[] = [
 
 /**
  * Statuses that mean THIS HOST is refusing us rather than that the QUERY is
- * wrong. Only these move on to the next host: a 400 is malformed QL and a 504 is
- * a query too big for any server, and re-running either on another volunteer
- * host doubles the load to get the same answer. 403 also covers the egress
- * relay's own `host_not_allowed`.
+ * wrong. Only these move on to the next host: a 400 is malformed QL, and
+ * re-running it on another volunteer host doubles the load to get the same
+ * answer. 403 also covers the egress relay's own `host_not_allowed`.
+ *
+ * 504 IS a host failure, not a query-size signal. Overpass reports a query
+ * that outruns its own [timeout] as HTTP 200 with a `remark: "runtime error:
+ * Query timed out"`; it answers 504 when the server is too loaded to START the
+ * query, and an nginx front end answers 504 when its
+ * backend is gone. Measured 2026-09-26 ~20:40Z: maps.mail.ru returned an nginx
+ * "504 Gateway Time-out" page in 1.4s for a 500 m cafe search — while this set
+ * excluded 504, the pack reported that as "reduce the area" and never tried the
+ * next host (fleet #2451, second outage).
  */
-const OVERPASS_HOST_REFUSED: ReadonlySet<number> = new Set([403, 406, 429, 502, 503, 521]);
+const OVERPASS_HOST_REFUSED: ReadonlySet<number> = new Set([403, 406, 429, 502, 503, 504, 521]);
 
 /** How long a host that hung or refused is skipped (per isolate). */
 const OVERPASS_BENCH_MS = 5 * 60_000;
@@ -793,7 +801,9 @@ async function postOverpass(
 
   throw new Error(
     `Overpass: no public Overpass instance answered${rateLimited ? ' (one is rate-limiting — try again shortly)' : ''}. ` +
-      `${attempts.join('; ')}.`,
+      `${attempts.join('; ')}. ` +
+      'This is the public OpenStreetMap Overpass servers being down, overloaded or refusing this service, ' +
+      'not a problem with your query — retry in a few minutes.',
   );
 }
 /**
