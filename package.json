@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-geo-reconcile",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Wikidata <-> OpenStreetMap reconciliation.",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-c42bfd8eb6eaa4b891d65ae43637b41145ec628d923c3ae8930ca1163439cebf",
-    "sourceCommit": "76aa8f5d9b5dc2f665563030647c68e661478864"
+    "sourceHash": "v1-2e5608a5341f96825c4b7725fde7ed5aef80329b27b0f2af0f7e3ba86a9a7cd5",
+    "sourceCommit": "91681e9a4a137fa0051d58e32f38c64b6334af5c"
   }
 }
