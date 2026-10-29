@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-geo-reconcile",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Wikidata <-> OpenStreetMap reconciliation.",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-geo-reconcile": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "geo-reconcile"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-geo-reconcile.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/geo-reconcile",
   "pipeworx": {
-    "sourceHash": "v1-1087fab90d09ce8cac917f178b3b5bfe048e81bfb7a87be17e5c5f7b7c98a5e6",
-    "sourceCommit": "445bacc5596a845c12d6945fbfcdf330ef60dcc4"
+    "mode": "gateway",
+    "slug": "geo-reconcile",
+    "gatewaySlug": "geo-reconcile",
+    "sourceHash": "v1-7cab24ee75bcb6c7dd0070a001b6964958aee63d2017b3e1eca527113115a21c",
+    "sourceCommit": "bb047243cf27f32453103de186b8e6a8b6a1ce79"
   }
 }
