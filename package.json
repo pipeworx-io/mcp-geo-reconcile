@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-geo-reconcile",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Wikidata <-> OpenStreetMap reconciliation.",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,7 @@
     "mode": "gateway",
     "slug": "geo-reconcile",
     "gatewaySlug": "geo-reconcile",
-    "sourceHash": "v1-7cab24ee75bcb6c7dd0070a001b6964958aee63d2017b3e1eca527113115a21c",
-    "sourceCommit": "bb047243cf27f32453103de186b8e6a8b6a1ce79"
+    "sourceHash": "v1-168093dd83f695a803eded4366ac104036908fd8d49d854599ec9f6257b5dd4e",
+    "sourceCommit": "030233f6b150a38a44421f88a5fcbad123f0fea8"
   }
 }
